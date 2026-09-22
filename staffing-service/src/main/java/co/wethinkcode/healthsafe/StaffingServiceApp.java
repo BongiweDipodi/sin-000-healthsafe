@@ -1,7 +1,14 @@
 package co.wethinkcode.healthsafe;
 
+import co.wethinkcode.healthsafe.mq.MqConfig;
 import io.javalin.Javalin;
+import org.apache.activemq.ActiveMQConnectionFactory;
 
+import javax.jms.Connection;
+import javax.jms.MessageProducer;
+import javax.jms.Session;
+import javax.jms.TextMessage;
+import javax.jms.Topic;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -24,20 +31,24 @@ public class StaffingServiceApp {
             String wardId = ctx.queryParam("wardId");
             String rawLevel = ctx.queryParam("level");
             int level = rawLevel == null ? 0 : Integer.parseInt(rawLevel);
+            String doctor = computeOnCallDoctor(wardId, level);
+            publishStaffingUpdate(wardId, level, doctor);
             ctx.json(Map.of(
                     "wardId", wardId,
                     "level", level,
-                    "doctor", computeOnCallDoctor(wardId, level)
+                    "doctor", doctor
             ));
         });
         app.get("/schedule/{wardId}", ctx -> {
             String wardId = ctx.pathParam("wardId");
             int level = fetchAlertLevel();
             validateWard(wardId);
+            String doctor = computeOnCallDoctor(wardId, level);
+            publishStaffingUpdate(wardId, level, doctor);
             ctx.json(Map.of(
                     "wardId", wardId,
                     "level", level,
-                    "doctor", computeOnCallDoctor(wardId, level)
+                    "doctor", doctor
             ));
         });
     }
@@ -62,6 +73,35 @@ public class StaffingServiceApp {
         };
 
         return doctors.get(Math.min(index, doctors.size() - 1));
+    }
+
+    public static void publishStaffingUpdate(String wardId, int level, String doctor) {
+        try {
+            var factory = new ActiveMQConnectionFactory(MqConfig.BROKER_URL);
+            try (Connection connection = factory.createConnection()) {
+                connection.start();
+                try (Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE)) {
+                    Topic topic = session.createTopic(MqConfig.TOPIC);
+                    try (MessageProducer producer = session.createProducer(topic)) {
+                        TextMessage message = session.createTextMessage(buildStaffingEvent(wardId, level, doctor));
+                        producer.send(message);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // Broker is optional until the shared docker compose stack is started.
+        }
+    }
+
+    static String buildStaffingEvent(String wardId, int level, String doctor) {
+        return "{\"wardId\":\"" + escapeJson(wardId) + "\",\"level\":" + level + ",\"doctor\":\"" + escapeJson(doctor) + "\"}";
+    }
+
+    private static String escapeJson(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     static void validateWard(String wardId) {
@@ -111,5 +151,3 @@ public class StaffingServiceApp {
         return 0;
     }
 }
-
-// MQ TODO: publishes to ActiveMQ topic MqConfig.TOPIC at MqConfig.BROKER_URL (see co.wethinkcode.healthsafe.mq.MqConfig)
